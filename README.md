@@ -80,12 +80,10 @@ throwing away partial information ([CHANGES §4–5](CHANGES.md#4-not-throwing-d
 
 ### The timing problem
 
-The PDU begins roughly **30–40 ms** after the grant. A single SDR that must *retune and re-lock*
-(about 190–400 ms in our measurements) will therefore **miss the first copy**. What a chaser can still
-catch is a **retry**, a repeat, or the later per-radio copies (a message to several radios is sent once
-per radio, a few seconds apart). The "first decode" time the chaser logs is usually the first
-*activity* ping, which is often the radio's ACK, not the page itself.
-
+The PDU begins up to roughly **500ms** after the grant. A single SDR that must *retune and re-lock*
+(about 190–400 ms in our measurements) will therefore **may miss the first copy**. What a chaser can still
+catch is **almost all**, a repeat, or the later per-radio copies (a message to several radios is sent once
+per radio, a few seconds apart).
 Approach A has no such problem: every channel already has a receiver on it before the grant.
 Approach B exists because it is a fraction of the cost and is good enough where "any copy" is the
 goal. Choose with that in mind. You can estimate how well a chaser would do on **your** tower before
@@ -152,7 +150,8 @@ Do this once **per dongle**, on the dongle's final antenna and cabling, at its o
 ## Approach A — wideband multi-channel (Airspy + `multi_rx.py`)
 
 One Airspy Mini at 6 Msps covers ~5 MHz, enough for 15+ channels of a typical site. `multi_rx.py` runs
-one decoder per channel in a single process.
+one decoder per channel in a single process. You can also add channels from multiple towers
+assuming you can hear them clearly. 
 
 ### Hardware
 
@@ -171,7 +170,7 @@ SoapySDRUtil --find      # or: python3 -c "import osmosdr"
 
 ### Configure (`config.json`)
 
-The device `frequency` must be the **centre of the span** covering your widest data channels — not
+The device `frequency` must be the **mathematical centre of the span** covering your widest data channels — not
 the control channel, and ideally not sitting on any individual working channel (DC spike at centre).
 You are listening to an entire ~3–5 MHz band at once so you catch every grant without retuning.
 (See example-multirx.json in ./apps/ folder)
@@ -194,7 +193,7 @@ Illustrative example (replace frequencies, ppm, and gains with your own):
   }],
   "channels": [
     {
-      "name": "SITE_A_772031",
+      "name": "SITE_A_f1",
       "device": "airspy",
       "frequency": 772031250,
       "demod_type": "cqpsk",
@@ -208,9 +207,9 @@ Illustrative example (replace frequencies, ppm, and gains with your own):
       "costas_alpha": 0.02
     },
     {
-      "name": "SITE_A_773093",
+      "name": "SITE_A_f2",
       "device": "airspy",
-      "frequency": 773093750,
+      "frequency": 773013750,
       "demod_type": "cqpsk",
       "filter_type": "rrc",
       "excess_bw": 0.2,
@@ -316,7 +315,7 @@ seconds), then it begins chasing.
 
 ### What to expect
 
-* Texts to a radio are sent once **per radio**, a few seconds apart; the chaser can pick up the later ones.
+* Texts to a radio are sent once **per radio**, a few seconds apart. Retune timing is the gap.
 * The controller logs every chase with `grant → tune-done → first decode` timing and counts grants it
   could not take because it was busy (`BUSY-MISS`).
 
@@ -324,7 +323,7 @@ seconds), then it begins chasing.
 
 ## Reading the logs
 
-Quiet by default; only recovered text reaches stderr unless started with `P25_SNDCP_DEBUG=1`.
+Mostly quiet by default; only recovered text reaches stderr unless started with `P25_SNDCP_DEBUG=1` env variable.
 
 | Line | Meaning |
 |---|---|
@@ -358,8 +357,8 @@ Requires **GNU Radio 3.10**, `gr-osmosdr` or SoapySDR with the Airspy/RTL driver
 compiler, and the usual dependencies of [boatbod/op25](https://github.com/boatbod/op25).
 
 ```bash
-git clone https://github.com/russinnes/op25-sndcp-packet-decoder.git
-cd op25-sndcp-packet-decoder
+git clone https://github.com/russinnes/P25-sndcp-packet-decoder.git
+cd P25-sndcp-packet-decoder
 ./install.sh
 ```
 
