@@ -24,6 +24,9 @@
 
 #include <gnuradio/msg_queue.h>
 #include <deque>
+#include <string>
+#include <vector>
+#include <cstdint>
 
 #include "ezpwd/rs"
 
@@ -38,6 +41,23 @@ namespace gr {
     namespace op25_repeater {
 
         static const int SND_FRAME = 160;   // pcm samples per frame
+
+        // Per-instance PDU/SNDCP reassembly session state. Was a single
+        // file-scope `static RidReasm g_reasm` shared by every p25p1_fdma
+        // object in the process -- harmless with one instance (rx.py's
+        // single-SDR retune model) but silently cross-wires channels the
+        // moment more than one instance runs concurrently in the same
+        // process (multi_rx.py: one p25p1_fdma per fixed-frequency
+        // channel). Two RIDs landing PDU bursts on *different* channels
+        // within the same REASM_WINDOW_SEC would interleave into the same
+        // buffer and corrupt both reassemblies. Now a member of
+        // p25p1_fdma so each channel's instance gets its own.
+        struct RidReasm {
+            uint32_t rid = 0;
+            double   last_ts = 0;
+            int      last_ser = -1;          /* most recently accepted block's serial, or -1 */
+            std::vector<uint8_t> buf;        /* arrival order, 16 data bytes each */
+        };
 
         class p25p1_fdma
         {
@@ -78,6 +98,12 @@ namespace gr {
                 bool d_do_audio_output;
                 int d_nac;
                 int d_behavior;
+                uint32_t d_dwell_rid = 0;  // RID of the currently-dwelled data channel, set via
+                                            // set_dwell_rid(); used to gate process_blocks()'s
+                                            // header-CRC-fail salvage branch against reasm.rid
+                RidReasm reasm;             // this instance's PDU/SNDCP reassembly session --
+                                            // see the RidReasm comment above for why this must
+                                            // be per-instance rather than a shared global
                 gr::msg_queue::sptr d_msg_queue;
                 std::deque<int16_t> &output_queue;
                 p25_framer* framer;
@@ -107,6 +133,7 @@ namespace gr {
             public:
                 void set_debug(int debug);
                 void set_nac(int nac);
+                void set_dwell_rid(uint32_t rid);
                 void reset_timer();
                 void call_end();
                 void crypt_reset();

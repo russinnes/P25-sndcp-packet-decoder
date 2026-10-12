@@ -74,7 +74,7 @@ static const struct _mode_data {
 	int expiration;
 } MODE_DATA[RX_N_TYPES] = {
 	{"NONE",   0,0,0,0},
-	{"P25P1",  48,0,57,1728},
+	{"P25P1",  48,0,57,9600},
 	{"P25P2",  40,0,180,2160},
 	{"DMR",    48,66,144,1728},
 	{"DSTAR",  48,72,96,2016*2},

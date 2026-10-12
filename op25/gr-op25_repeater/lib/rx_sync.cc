@@ -549,7 +549,25 @@ void rx_sync::rx_sym(const uint8_t sym) {
 		if (d_debug >= 10) {
 			fprintf(stderr, "%s %s: sync expiry, symbol %d\n", logts.get(d_msgq_id), MODE_DATA[d_current_type].type, d_symbol_count);
         }
-        sync_reset();
+		/* v6: a P25 PDU has no length of its own -- its body is only handed to
+		 * the framer when the NEXT sync arrives (variable-length branch above).
+		 * If the tower goes quiet after the PDU, no sync arrives, the expiry
+		 * fires and the whole PDU used to be thrown away. Deliver what has
+		 * been received so far instead. d_rx_count is the number of symbols
+		 * since the NID fragment completed, i.e. the length of the body. */
+		if (d_current_type == RX_TYPE_P25P1 &&
+		    d_fragment_len != MODE_DATA[d_current_type].fragment_len &&
+		    d_rx_count >= 100) {
+			const int V6_EXPIRY_MAX_SYMS = 3600;	/* ~35 blocks; the rest is noise */
+			int n = d_rx_count;
+			if (n > V6_EXPIRY_MAX_SYMS)
+				n = V6_EXPIRY_MAX_SYMS;
+			if (getenv("P25_SNDCP_DEBUG") && atoi(getenv("P25_SNDCP_DEBUG")) > 0)
+			fprintf(stderr, "%s rx_sync: v6 delivering PDU body on expiry, %d symbols (of %d)\n",
+				logts.get(d_msgq_id), n, d_rx_count);
+			p25fdma.load_body(d_cbuf + d_cbuf_idx + CBUF_SIZE - d_rx_count, n);
+		}
+		sync_reset();
 		return;
 	}
 	if (d_rx_count < d_fragment_len)

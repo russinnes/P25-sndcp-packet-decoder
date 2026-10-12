@@ -1,2 +1,3 @@
 "Sysname"	"Control Channel List"	"Offset"	"NAC"	"Modulation"	"TGID Tags File"	"Whitelist"	"Blacklist"	"Center Frequency"
-"P25 SYSTEM"	"876.54320"	"0"	"0"	"cqpsk"	""	""	""	""
+"Conventional"	"772.03475"	"0"	"0"	"fsk4"	""	""	""	""
+"Conventional"	"772.03475"	"0"	"0"	"fsk4"	""	""	""	""

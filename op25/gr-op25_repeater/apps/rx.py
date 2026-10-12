@@ -25,6 +25,8 @@
 # Software Foundation, Inc., 51 Franklin Street, Boston, MA
 # 02110-1301, USA.
 
+# Modified for SNDCP Russ Innes
+
 "true" '''\'
 DEFAULT_PYTHON2=/usr/bin/python
 DEFAULT_PYTHON3=/usr/bin/python3
@@ -51,8 +53,11 @@ exit 127
 import io
 import os
 import pickle
+import shutil
 import sys
+import subprocess
 import threading
+import socket
 import math
 import numpy
 import time
@@ -107,6 +112,54 @@ WIRESHARK_PORT = 23456
 _def_interval = 1.0    # sec
 _def_file_dir = '../www/images'
 
+
+class _FeedControlClient(object):
+    """Counterpart to sdr_feed.py's FeedControlServer. Used only in
+    --stdin mode, where self.src doesn't exist in this process -- the
+    radio lives in sdr_feed.py instead, so tuning has to reach it over
+    this socket rather than through a direct method call.
+
+    Fire-and-forget by design, matching this file's existing rule that
+    nothing on the tuning/capture path may block: a lost or delayed
+    retune is far cheaper than stalling the flowgraph waiting on a
+    socket round trip. Reconnects lazily on the next send if the
+    connection ever drops (e.g. sdr_feed.py restarted) rather than
+    trying to maintain a persistent connection through failures."""
+
+    def __init__(self, sock_path):
+        self.sock_path = sock_path
+        self.sock = None
+
+    def _ensure_connected(self):
+        if self.sock is not None:
+            return True
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(self.sock_path)
+            self.sock = s
+            return True
+        except OSError as e:
+            sys.stderr.write("%s feed control: connect FAILED: %s (%s)\n" % (
+                log_ts.get(), self.sock_path, e))
+            self.sock = None
+            return False
+
+    def send(self, d):
+        if not self._ensure_connected():
+            return
+        try:
+            self.sock.sendall((json.dumps(d) + "\n").encode())
+        except OSError as e:
+            sys.stderr.write("%s feed control: send FAILED: %s (%s)\n" % (
+                log_ts.get(), d, e))
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None   # next send() reconnects
+
+
 # The P25 receiver
 #
 class p25_rx_block (gr.top_block):
@@ -131,6 +184,35 @@ class p25_rx_block (gr.top_block):
         self.mixer_sink = None
         self.fll_sink = None
         self.demod = None
+        self.feed_ctl = None   # set in open_stdin() only; None means "tune self.src directly"
+
+        # Conditional raw-IQ capture: off by default, started/stopped on
+        # demand via the 'capture' JSON command (see process_qmsg()).
+        # Taps self.source directly (post-DDC in every mode, including
+        # --stdin where there's no self.src at all) -- fan-out alongside
+        # the live decode chain, not instead of it. Written in GNU
+        # Radio's standard raw complex64 format, so it's directly
+        # replayable later through this same class's existing open_ifile
+        # path with zero new replay code needed.
+        #
+        # THIS USED TO LIVE INSIDE __set_rx_from_osmosdr, which only
+        # open_usrp() ever calls -- open_stdin() (and open_ifile/
+        # open_audio/open_audio_c/open_ifile2, all of which go through
+        # __set_rx_from_audio instead) never set these at all, so the
+        # first 'capture' command in any of those modes hit an
+        # AttributeError (confirmed in the field, --stdin mode). Moved
+        # here so it runs for every mode regardless of which source path
+        # gets used.
+        self.capture_sink = None
+        self.capture_filename = None
+        # Bounds how many replay children can run concurrently (see
+        # _spawn_replay). A plain threading.Semaphore, not a lock --
+        # replay_concurrency may be >1 if that's ever worth allowing,
+        # default is 1 (fully serialized) for the A/B test this exists
+        # for. Acquired in the (daemon) thread that launches each child,
+        # never on this flowgraph's own real-time path. Same
+        # every-mode-not-just-osmosdr fix as capture_sink above.
+        self._replay_slots = threading.Semaphore(max(1, options.replay_concurrency))
         self.target_freq = 0.0
         self.last_error_update = 0
         self.tuning_error = 0
@@ -147,7 +229,7 @@ class p25_rx_block (gr.top_block):
         self.ui_timeout = 5.0
 
         self.src = None
-        if (not options.ifile) and (not options.input) and (not options.audio) and (not options.audio_if) and (not options.symbols):
+        if (not options.stdin) and (not options.ifile) and (not options.input) and (not options.audio) and (not options.audio_if) and (not options.symbols):
             # check if osmocom is accessible
             try:
                 import osmosdr
@@ -236,8 +318,19 @@ class p25_rx_block (gr.top_block):
         self.meta_q = gr.msg_queue(10)
  
         # configure specified data source
-        if options.input:
-            self.open_file(options.input)
+        if options.stdin:
+            self.open_stdin(self.channel_rate, options.gain)
+            # Mirrors open_usrp's own post-setup call below: demod only
+            # exists once __set_rx_from_audio (inside open_stdin) has
+            # run, so this can't happen any earlier. Without this,
+            # sdr_feed.py's own -f is the RAW frequency with none of
+            # calibration/offset/fine_tune applied -- this is what
+            # sends the corrected tune_freq to it for the first time.
+            if self.options.frequency:
+                self.last_freq_params['freq'] = self.options.frequency
+                self.set_freq(self.options.frequency)
+        elif options.input:
+            self.open_ifile(self.channel_rate, options.gain, options.input, 0)
         elif (self.rtl_found or options.frequency):
             self.open_usrp()
         elif options.audio_if:
@@ -586,6 +679,9 @@ class p25_rx_block (gr.top_block):
             self.decoder.set_scaler_k((1 / 32768.0) * (vol * 0.1))
 
     def set_rtl_ppm(self, ppm):
+        if self.feed_ctl is not None:
+            self.feed_ctl.send({"command": "set_freq_corr", "ppm": ppm})
+            return
         self.src.set_freq_corr(ppm)
 
     def set_freq_tune(self, val):
@@ -603,12 +699,29 @@ class p25_rx_block (gr.top_block):
         tune as close to the desired frequency as it can.  Then we use
         the result of that operation and our target_frequency to
         determine the value for the digital down converter.
+
+        In --stdin mode there is no local front-end (self.src is None,
+        the radio lives in sdr_feed.py) -- self.feed_ctl is set instead,
+        and the tune request is forwarded there. All the correction
+        terms (calibration/offset/fine_tune) are still applied HERE,
+        the same as always, so sdr_feed.py only ever receives a final
+        absolute frequency and doesn't need to know about any of them.
+        Fire-and-forget: there's no synchronous confirmation the remote
+        tune actually landed, so the True/False this returns in that
+        mode means "sent", not "confirmed" -- that's an accepted
+        trade-off for never blocking the tuning path on a round trip.
         """
-        if not self.src:
+        if not self.src and self.feed_ctl is None:
             return False
         self.target_freq = target_freq
         tune_freq = target_freq + self.options.calibration + self.options.offset + self.options.fine_tune
-        r = self.src.set_center_freq(tune_freq)
+
+        if self.feed_ctl is not None:
+            self.feed_ctl.send({"command": "set_freq", "freq": tune_freq})
+            r = True
+        else:
+            r = self.src.set_center_freq(tune_freq)
+
         self.demod.reset()      # reset gardner-costas loop
 
         if self.fft_sink:
@@ -756,6 +869,300 @@ class p25_rx_block (gr.top_block):
             self.remove_plot_sink(self.symbol_sink)
             self.symbol_sink = None
 
+    # Start/stop raw-IQ capture on demand, via the 'capture' JSON
+    # command. Same dynamic-connect pattern as the scope/plot toggles
+    # below (lock/connect/unlock) -- taps self.src directly, so it's a
+    # fan-out alongside the live decode chain rather than replacing it.
+    # filename is caller-supplied (e.g. tied to a specific dwell) so a
+    # controller script can name it meaningfully; auto-generated if
+    # omitted. No automatic max-duration cap here by design -- that's
+    # the caller's responsibility (a controller already tracking
+    # dwell/max-dwell timing for its own tune logic, e.g.
+    # op25_sdr_only.py, should send 'stop' from the same place it
+    # already decides to release back to the control channel).
+    def start_capture(self, filename=None):
+        if self.capture_sink is not None:
+            return  # already capturing; caller should stop() first
+        if not filename:
+            # RAM-backed by default: /dev/shm is POSIX/Linux-conventional
+            # tmpfs (unlike /tmp, which isn't guaranteed RAM-backed on
+            # every distro). Zero real disk I/O for the common case
+            # where this capture ends up discarded.
+            filename = "/dev/shm/op25_capture_%d.cf32" % int(time.time())
+        self.capture_filename = filename
+        self.capture_sink = blocks.file_sink(gr.sizeof_gr_complex, filename)
+        self.lock()
+        # self.src is None in --stdin mode (no local radio); self.source
+        # (post-gain, same complex64 format) always exists regardless of
+        # source path and is the closest equivalent -- raw except for
+        # whatever the -g digital scalar applied (1.0/no-op by default).
+        # Also confirmed in the field: tapping self.src unconditionally
+        # here crashed --stdin mode the same way the missing
+        # capture_sink init did, right after that fix.
+        self.connect(self.src if self.src is not None else self.source, self.capture_sink)
+        self.unlock()
+        sys.stderr.write("%s capture started: %s\n" % (log_ts.get(), filename))
+
+    def stop_capture(self, keep_as=None):
+        if self.capture_sink is None:
+            return
+        self.lock()
+        self.disconnect(self.src if self.src is not None else self.source, self.capture_sink)
+        self.unlock()
+        fn = self.capture_filename
+        self.capture_sink = None
+        self.capture_filename = None
+        if keep_as:
+            # The only point any of this touches real disk I/O -- moving
+            # a capture actually worth keeping out of RAM and onto
+            # persistent storage. Captures that get discarded (the
+            # common case) never reach this branch at all.
+            try:
+                d = os.path.dirname(keep_as)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+                shutil.move(fn, keep_as)
+                sys.stderr.write("%s capture kept: %s -> %s\n" % (log_ts.get(), fn, keep_as))
+                self._spawn_replay(keep_as)   # fire-and-forget -- does NOT block here
+            except OSError as e:
+                sys.stderr.write("%s capture keep FAILED: %s -> %s (%s)\n" % (
+                    log_ts.get(), fn, keep_as, e))
+                # shutil.move() only unlinks the source once the copy to
+                # the destination succeeds, so a failed move (e.g. the
+                # destination filesystem being full, as seen in the
+                # field) leaves fn orphaned in /dev/shm -- nothing else
+                # references it once capture_filename is cleared above,
+                # so without this it just sits there taking up RAM
+                # forever, on top of whatever caused the move to fail
+                # in the first place.
+                try:
+                    if os.path.exists(fn):
+                        os.remove(fn)
+                        sys.stderr.write("%s cleaned up orphaned %s after failed keep\n" % (
+                            log_ts.get(), fn))
+                except OSError:
+                    pass
+        else:
+            sys.stderr.write("%s capture stopped (left at %s)\n" % (log_ts.get(), fn))
+
+    def discard_capture(self):
+        # Stop (if still running) and delete the file -- done here,
+        # not by the controller, since the controller may be on a
+        # different host than rx.py and the file is local to this one.
+        # Was RAM-only (/dev/shm) the whole time unless the caller had
+        # already moved it via stop_capture(keep_as=...), so this is
+        # just freeing memory pages, not a real disk write+delete.
+        fn = self.capture_filename
+        if self.capture_sink is not None:
+            self.stop_capture()
+        if fn:
+            try:
+                os.remove(fn)
+                sys.stderr.write("%s capture discarded: %s\n" % (log_ts.get(), fn))
+            except OSError as e:
+                sys.stderr.write("%s capture discard FAILED: %s (%s)\n" % (log_ts.get(), fn, e))
+        self.capture_filename = None
+
+    def _replay_port(self):
+        if self.options.replay_http_port:
+            return self.options.replay_http_port
+        # Default: live port + 1. Parse it out of terminal_type
+        # ("http:0.0.0.0:8085"); fall back to a fixed port if that
+        # somehow doesn't parse rather than crash a live capture over
+        # a replay-scheduling detail.
+        try:
+            live_port = int(self.options.terminal_type.rsplit(':', 1)[1])
+            return live_port + 1
+        except (ValueError, IndexError, AttributeError):
+            return 8086
+
+    def _supervise_replay(self, proc, tag, timeout, filename, slot_sem=None):
+        """Guarantees this replay child actually terminates. rx.py's
+        file-replay mode currently loops the input file forever
+        (repeat=1 in open_ifile) -- without an active watchdog per
+        child, it just runs indefinitely. The previous design (a
+        shared list, reaped opportunistically whenever the *next*
+        capture got kept) was not sufficient for an infinite loop
+        specifically: confirmed in the field -- one replay ran for
+        28+ seconds, 673 lines of the same file on repeat, because no
+        other capture happened to get kept in that window to trigger
+        a check. This runs in its own thread per spawned replay, so
+        termination never depends on any other event happening.
+
+        Also deletes filename once the replay is done with it, whether
+        it exited naturally or had to be killed. Without this, kept
+        captures accumulate forever -- confirmed in the field as a
+        real cascade failure: the keep-directory filled up completely
+        (ENOSPC), after which every subsequent capture-keep also
+        failed, compounding indefinitely. Any decoded content was
+        already printed/exported live during the replay itself
+        (including TMS_TEXT_PARTIAL for incomplete messages), so the
+        raw IQ file has no further purpose once replay finishes --
+        deleting it here doesn't lose anything downstream consumers
+        would see.
+
+        slot_sem, if given, is released here -- after wait/terminate/kill
+        and the delete attempt, whatever the outcome -- so a queued
+        replay's turn starts only once this one is genuinely finished
+        with the CPU/IO it was using, not just once it was launched."""
+        try:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                sys.stderr.write("%s [%s] replay exceeded %.1fs (still looping), terminating\n" % (
+                    log_ts.get(), tag, timeout))
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            try:
+                os.remove(filename)
+                sys.stderr.write("%s [%s] replay done, deleted %s\n" % (log_ts.get(), tag, filename))
+            except OSError as e:
+                sys.stderr.write("%s [%s] replay done, delete FAILED: %s (%s)\n" % (
+                    log_ts.get(), tag, filename, e))
+        finally:
+            if slot_sem is not None:
+                slot_sem.release()
+
+    def _pipe_replay_output(self, proc, tag):
+        """Runs in a background thread: reads the replay child's stderr
+        line by line and re-writes each line into our own stderr,
+        tagged so it's clearly distinguishable -- and grep/sort-able --
+        from live decode output despite sharing the same stream. The
+        decode-stage lines themselves (CONFIRMED blk/PDU hdr/REASM/
+        TMS_TEXT/etc.) are otherwise byte-for-byte identical to live
+        output, since it's the same p25p1_fdma.cc pipeline either way.
+        Exits naturally on EOF, which _supervise_replay's terminate()
+        causes by closing the pipe -- no coordination needed between
+        the two threads beyond that."""
+        try:
+            for line in proc.stderr:
+                sys.stderr.write("[%s] %s" % (tag, line))
+        except Exception:
+            pass
+        sys.stderr.write("%s [%s] replay finished\n" % (log_ts.get(), tag))
+
+    # Cached once per process: whether nice/ionice binaries exist, so
+    # every replay doesn't re-probe the filesystem. None = not checked yet.
+    _nice_bin = None
+    _ionice_bin = None
+
+    def _spawn_replay(self, filename):
+        # Fire-and-forget from the CALLER's perspective: returns
+        # immediately either way. MUST NOT block the live tuning loop --
+        # that would reintroduce a blind window right in front of the
+        # next grant, exactly what quiet-cancellation and this whole
+        # capture feature exist to avoid.
+        #
+        # --no-replay: for the A/B test of whether replay children are
+        # themselves contributing to live sample loss under CPU
+        # pressure. The capture is already safely on disk by the time
+        # we're called (stop_capture did that); we just don't act on
+        # it. Left in place rather than deleted -- "nothing lost", per
+        # --no-replay's help text -- so a run with replay off doesn't
+        # also throw away the evidence a run with it on would have kept.
+        if self.options.no_replay:
+            sys.stderr.write("%s replay SKIPPED (--no-replay): %s\n" % (log_ts.get(), filename))
+            return
+        threading.Thread(target=self._spawn_replay_worker, args=(filename,), daemon=True).start()
+
+    def _spawn_replay_worker(self, filename):
+        # Runs entirely off the real-time path (its own daemon thread).
+        # Blocks on the semaphore here, not in _spawn_replay, so a burst
+        # of kept captures queues up harmlessly instead of piling on
+        # concurrent replay children -- each of which is itself a full
+        # second rx.py + GNU Radio flowgraph, i.e. real CPU competition
+        # with the live process on the same box. Default concurrency is
+        # 1 (fully serialized) for exactly that reason.
+        acquired_immediately = self._replay_slots.acquire(blocking=False)
+        if not acquired_immediately:
+            sys.stderr.write("%s replay QUEUED (waiting for slot): %s\n" % (log_ts.get(), filename))
+            self._replay_slots.acquire()
+
+        # stderr goes through a pipe + background reader thread (not
+        # direct fd inheritance) specifically so every line can be
+        # tagged -- decode-stage output is otherwise indistinguishable
+        # from live once interleaved into the same stream. Note the
+        # timestamps replay output prints are wall-clock at REPLAY time,
+        # not the original capture time -- don't read them as when the
+        # event actually happened over the air.
+        try:
+            size = os.path.getsize(filename)
+        except OSError:
+            self._replay_slots.release()
+            return
+        rate = self.options.sample_rate or 1000000
+        duration = size / 8.0 / rate   # complex64 = 8 bytes/sample
+        timeout = duration + 5.0
+
+        cmd = [
+            # NOTE: must stay "--input" (options.input), not "-F"
+            # (options.ifile). __init__'s data-source dispatch checks
+            # `if options.input: ... elif (self.rtl_found or
+            # options.frequency): open_usrp() ... elif options.ifile:
+            # ...` in that order -- since this command also passes
+            # -f/--frequency (for target_freq bookkeeping), using -F
+            # instead of --input lets the options.frequency branch
+            # fire first and try to open real SDR hardware that was
+            # never initialized for a file replay, crashing with
+            # "'NoneType' object has no attribute 'set_sample_rate'"
+            # (confirmed in the field). --input's branch is checked
+            # first regardless of options.frequency, so it's the only
+            # safe choice here even though it shares a name with the
+            # thing that isn't the bug. The actual repeat/looping fix
+            # lives in open_ifile() itself (repeat=False), not here.
+            sys.executable, os.path.abspath(sys.argv[0]),
+            "--input", filename,
+            "-S", str(rate),
+            "-f", str(int(self.target_freq)),
+            "-q", str(self.options.freq_corr),
+            "-d", str(self.options.fine_tune),
+            "-g", "1.0",
+            "-v", str(self.options.verbosity),
+            "-l", "http:0.0.0.0:%d" % self._replay_port(),
+        ]
+
+        # Best-effort: run the child at lower CPU scheduling priority
+        # (nice) and idle IO priority (ionice -c3) so it can never
+        # outcompete the live flowgraph for the same two cores under
+        # load -- it just takes longer to finish, which is fine, it has
+        # no real-time deadline. Probed once per process and skipped
+        # silently if either binary is missing (e.g. a minimal image
+        # without util-linux's ionice) rather than failing the replay.
+        if self.options.replay_nice:
+            if p25_rx_block._nice_bin is None:
+                p25_rx_block._nice_bin = shutil.which("nice") or ""
+            if p25_rx_block._ionice_bin is None:
+                p25_rx_block._ionice_bin = shutil.which("ionice") or ""
+            prefix = []
+            if p25_rx_block._ionice_bin:
+                prefix += [p25_rx_block._ionice_bin, "-c3"]  # idle class
+            if p25_rx_block._nice_bin:
+                prefix += [p25_rx_block._nice_bin, "-n", str(self.options.replay_nice)]
+            cmd = prefix + cmd
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            tag = "REPLAY pid=%d %s" % (proc.pid, os.path.basename(filename))
+            threading.Thread(target=self._pipe_replay_output, args=(proc, tag), daemon=True).start()
+            threading.Thread(target=self._supervise_replay,
+                              args=(proc, tag, timeout, filename, self._replay_slots),
+                              daemon=True).start()
+            sys.stderr.write("%s [%s] replay spawned (port %d, timeout %.1fs, nice=%s)\n" % (
+                log_ts.get(), tag, self._replay_port(), timeout, self.options.replay_nice))
+        except OSError as e:
+            sys.stderr.write("%s replay spawn FAILED: %s (%s)\n" % (log_ts.get(), filename, e))
+            self._replay_slots.release()
+
     def toggle_eye(self):
         if (self.eye_sink is None):
             self.eye_sink = eye_sink_f(sps=self.sps)
@@ -830,17 +1237,6 @@ class p25_rx_block (gr.top_block):
             self.src.set_antenna(self.options.antenna)
         self.info["capture-rate"] = capture_rate
         self.src.set_bandwidth(capture_rate)
-        # capture file
-        # if preserve:
-        if 0:
-            try:
-                self.capture_filename = os.tmpnam()
-            except RuntimeWarning:
-                ignore = True
-            capture_file = blocks.file_sink(gr.sizeof_gr_complex, self.capture_filename)
-            self.__connect([[self.usrp, capture_file]])
-        else:
-            self.capture_filename = None
         # everything else
         self.__build_graph(self.src, capture_rate)
 
@@ -852,15 +1248,69 @@ class p25_rx_block (gr.top_block):
         f.close()
 
     def open_ifile(self, capture_rate, gain, input_filename, file_seek):
-        speed = 96000 # TODO: fixme
-        ifile = blocks.file_source(gr.sizeof_gr_complex, input_filename, 1)
+        # Was hardcoded to speed = 96000 ("TODO: fixme" in the original
+        # source) -- silently ignored whatever real sample rate the file
+        # was actually captured at, e.g. our own 1,000,000 sps IQ
+        # captures. That wouldn't crash; it would just throttle/replay
+        # the file at the wrong rate, producing a badly mistimed stream
+        # the demod/decode chain could never lock onto -- indistinguishable
+        # from "genuinely nothing there" without actually being that.
+        # repeat=False (was 1/True): a looping file_source was replaying
+        # the capture forever. Confirmed in the field to corrupt
+        # reassembly -- a still-incomplete message at end-of-file got a
+        # second pass appended onto its own reassembly buffer (same-RID
+        # sessions within REASM_WINDOW_SEC aren't reset by a file loop
+        # restart), so blocks already seen once were silently
+        # re-appended as if they were new content, splicing a message's
+        # own early blocks onto its own tail (e.g. real text immediately
+        # followed by another copy of the fixed "AHS_Messaging_" prefix).
+        # A single honest pass reports a message still incomplete at EOF
+        # as exactly that, instead of "completing" it with stale bytes.
+        ifile = blocks.file_source(gr.sizeof_gr_complex, input_filename, False)
         if file_seek > 0:
             rc = ifile.seek(file_seek*1024, gr.SEEK_SET)
             assert rc == True
-        throttle = blocks.throttle(gr.sizeof_gr_complex, speed)
+        throttle = blocks.throttle(gr.sizeof_gr_complex, capture_rate)
         self.source = blocks.multiply_const_cc(gain)
         self.connect(ifile, throttle, self.source)
-        self.__set_rx_from_audio(speed)
+        self.__set_rx_from_audio(capture_rate)
+
+    def open_stdin(self, capture_rate, gain):
+        # Companion to sdr_feed.py: reads raw complex64 IQ from fd 0.
+        # Deliberately file_descriptor_source, NOT file_source --
+        # file_source does fseek/ftell bookkeeping internally that a
+        # pipe can't satisfy (pipes aren't seekable), which is exactly
+        # the kind of thing that fails in ways indistinguishable from
+        # "no signal" rather than a clean error. file_descriptor_source
+        # has no such assumption, it just reads bytes as they arrive.
+        #
+        # No throttle here, unlike open_ifile: a file replay throttles
+        # itself down to a realistic pace because the whole file is
+        # instantly available and would otherwise blast through faster
+        # than any timing-sensitive block downstream expects. Stdin has
+        # no such surplus -- sdr_feed.py on the other end is already
+        # producing samples at real hardware rate (or slower, if it's
+        # catching up from its own ring buffer), so an extra throttle
+        # here would only add pacing jitter of its own for no benefit.
+        # gain here is a post-DDC digital scalar (same reuse of -g/--gain
+        # as open_ifile), NOT the hardware RF gain -- that's sdr_feed.py's
+        # own -g/-N, already applied on its side before samples ever
+        # reach this pipe. options.gain defaults to None (meant for the
+        # USRP-gain-in-dB case); the replay-child command always passes
+        # an explicit "-g 1.0" so it never hits this, but a manual
+        # --stdin invocation without -g does. None * anything crashes
+        # multiply_const_cc's constructor, so default to a no-op 1.0.
+        if gain is None:
+            gain = 1.0
+        ifile = blocks.file_descriptor_source(gr.sizeof_gr_complex, 0, False)
+        self.source = blocks.multiply_const_cc(gain)
+        self.connect(ifile, self.source)
+        # self.src stays None in this mode (there's no local radio to
+        # hold a reference to) -- set_freq/set_rtl_ppm check for that
+        # and forward to sdr_feed.py over this instead. See
+        # _FeedControlClient's docstring for why fire-and-forget.
+        self.feed_ctl = _FeedControlClient(self.options.feed_control_sock)
+        self.__set_rx_from_audio(capture_rate)
 
     def open_ifile2(self, capture_rate, file_name):
         source = blocks.file_source(gr.sizeof_gr_complex, file_name, False)
@@ -970,6 +1420,19 @@ class p25_rx_block (gr.top_block):
             freq = msg.arg1()
             self.last_freq_params['freq'] = freq
             self.set_freq(freq)
+        elif s == 'set_dwell_rid':
+            # Companion to set_freq, sent by op25_sdr_only.py right before
+            # (or instead of) a data-channel retune so the C++ decoder
+            # knows which RID this dwell belongs to. Lets process_blocks()
+            # in p25p1_fdma.cc gate its header-CRC-fail salvage path on
+            # g_reasm.rid == d_dwell_rid, instead of trusting whatever RID
+            # a stale, still-recent g_reasm session happens to be holding
+            # from the PREVIOUS dwell -- see p25p1_fdma::set_dwell_rid().
+            # arg2 unused, but sent (as 0) for the same reason http_capture()
+            # always sends it: some post_req paths index arg2 directly.
+            rid = int(msg.arg1())
+            if self.decoder is not None:
+                self.decoder.control({'tuner': 0, 'cmd': 'set_dwell_rid', 'rid': rid})
         elif s == 'adj_tune':
             freq = msg.arg1()
             self.adj_tune(freq)
@@ -982,7 +1445,19 @@ class p25_rx_block (gr.top_block):
             nac = msg.arg1()
             self.trunk_rx.add_default_config(int(nac))
         elif s == 'capture':
-            pass
+            # {"command":"capture","arg1":"start","arg2":"/dev/shm/file.cf32"}
+            # {"command":"capture","arg1":"stop"}                        -- stop, leave in place
+            # {"command":"capture","arg1":"stop","arg2":"/path/keep.cf32"} -- stop AND move to disk
+            # {"command":"capture","arg1":"discard"}                     -- stop (if needed) and delete
+            action = d.get('arg1', 'start')
+            if action == 'start':
+                fn = d.get('arg2')
+                self.start_capture(fn if isinstance(fn, str) and fn else None)
+            elif action == 'stop':
+                keep_as = d.get('arg2')
+                self.stop_capture(keep_as if isinstance(keep_as, str) and keep_as else None)
+            elif action == 'discard':
+                self.discard_capture()
         elif s == 'watchdog':
             if self.ui_last_update > 0 and (time.time() > (self.ui_last_update + self.ui_timeout)):
                 self.ui_last_update = 0
@@ -1073,6 +1548,19 @@ class rx_main(object):
         parser.add_option("-A", "--audio-if", action="store_true", default=False, help="soundcard IF mode (use --calibration to set IF freq)")
         parser.add_option("-I", "--audio-input", type="string", default="", help="pcm input device name.  E.g., hw:0,0 or /dev/dsp")
         parser.add_option("-i", "--input", default=None, help="input file name")
+        parser.add_option("--stdin", action="store_true", default=False,
+                          help="read raw complex64 IQ from stdin (fd 0) instead of a "
+                               "file or the SDR directly -- for piping in a separate "
+                               "acquisition process (e.g. sdr_feed.py) that owns the "
+                               "radio and buffers, so this process is decoupled from "
+                               "the hardware's real-time deadline. Sample rate must "
+                               "match the producer's -S. Checked before --input/-F.")
+        parser.add_option("--feed-control-sock", type="string",
+                          default="/tmp/op25_feed_control.sock",
+                          help="With --stdin: Unix domain socket to send set_freq/"
+                               "set_freq_corr commands to, since this process has no "
+                               "self.src of its own to tune directly -- must match "
+                               "sdr_feed.py's --control-sock. Ignored without --stdin.")
         parser.add_option("-b", "--excess-bw", type="eng_float", default=0.2, help="for RRC filter", metavar="Hz")
         parser.add_option("-c", "--calibration", type="eng_float", default=0.0, help="USRP offset or audio IF frequency", metavar="Hz")
         parser.add_option("-C", "--costas-alpha", type="eng_float", default=0.001, help="value of alpha for Costas loop", metavar="Hz")
@@ -1089,6 +1577,30 @@ class rx_main(object):
         parser.add_option("-t", "--tone-detect", action="store_true", default=False, help="use experimental tone detect algorithm")
         parser.add_option("-T", "--trunk-conf-file", type="string", default=None, help="trunking config file name")
         parser.add_option("-v", "--verbosity", type="int", default=0, help="message debug level")
+        parser.add_option("--replay-http-port", type="int", default=None,
+                          help="Fire-and-forget replay children spawned by a kept "
+                               "capture use this HTTP port instead of the live one "
+                               "(--capture 'discard'/'stop' handling). Must differ "
+                               "from the live -l port. Defaults to live port + 1.")
+        parser.add_option("--no-replay", action="store_true", default=False,
+                          help="Disable spawning replay-child subprocesses entirely. "
+                               "Kept captures are still moved to disk (nothing lost), "
+                               "just never auto-replayed. For A/B testing whether the "
+                               "replay children are themselves contributing to live "
+                               "sample loss under CPU pressure -- run one window with "
+                               "this on, one with it off, and compare the live "
+                               "had_ping-blank rate between them.")
+        parser.add_option("--replay-nice", type="int", default=10,
+                          help="Run replay children at this 'nice' level (and best-"
+                               "effort idle IO priority) so they never outcompete the "
+                               "live flowgraph for CPU/IO under load. 0 disables "
+                               "niceing. Ignored if --no-replay is set.")
+        parser.add_option("--replay-concurrency", type="int", default=1,
+                          help="Max replay children allowed to run at once; further "
+                               "kept captures queue and replay once a slot frees up. "
+                               "Serializing (the default, 1) avoids replay subprocesses "
+                               "piling up and adding their own CPU pressure on top of "
+                               "whatever caused the live miss in the first place.")
         parser.add_option("-V", "--vocoder", action="store_true", default=False, help="voice codec")
         parser.add_option("-n", "--nocrypt", action="store_true", default=False, help="silence encrypted traffic")
         parser.add_option("--crypt-behavior", type="int", default=2, help="encrypted traffic behavior: 0=allow, 1=silence, 2=skip")

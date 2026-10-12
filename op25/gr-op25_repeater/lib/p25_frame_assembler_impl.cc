@@ -51,6 +51,20 @@ namespace gr {
         // Returns a JSON-encoded response string for commands that produce
         // output, or an empty string for commands that don't.
         std::string p25_frame_assembler_impl::control(const std::string& args) {
+            /* json::parse() (and the various j["field"].get<T>() calls
+             * below) throw on malformed input or an unexpected/missing
+             * field -- e.g. anything that reaches the HTTP terminal
+             * (terminal.py's http_server, port 8085) that isn't valid
+             * JSON matching one of the commands below. Uncaught, that
+             * exception unwinds out of a GNU Radio message-passing
+             * callback rather than a normal call stack, and has been
+             * observed to segfault instead of cleanly aborting (seen
+             * live: a segfault resolving straight into
+             * nlohmann::json::detail::parse_error::create). A bad
+             * control command should never be able to take down the
+             * whole receiver, so the entire body is now guarded: log
+             * and return {} instead of throwing out of this function. */
+            try {
             json j = json::parse(args);
             std::string cmd = j["cmd"].get<std::string>();
             if (d_debug >= 10) {
@@ -66,6 +80,8 @@ namespace gr {
                 p2tdma.set_nac(nac);
             } else if (cmd == "reset_timer") {
                 p1fdma.reset_timer();
+            } else if (cmd == "set_dwell_rid") {
+                p1fdma.set_dwell_rid(j["rid"].get<uint32_t>());
             } else if (cmd == "call_end") {
                 p1fdma.call_end();
                 p2tdma.call_end();
@@ -89,6 +105,10 @@ namespace gr {
                 if (d_debug >= 10) {
                     fprintf(stderr, "%s p25_frame_assembler_impl::control: unhandled cmd(%s)\n", logts.get(0), cmd.c_str());
                 }
+            }
+            } catch (const std::exception& e) {
+                fprintf(stderr, "%s p25_frame_assembler_impl::control: bad command, ignored: %s (args=%s)\n",
+                        logts.get(0), e.what(), args.c_str());
             }
             return {};
         }

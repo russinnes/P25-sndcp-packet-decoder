@@ -6,15 +6,13 @@ These high level instructions will lead you through installing op25 on Debian ba
 
 **Note 2:** versions of cmake later than 3.10.3 have been known to cause dependency issues while building the swig libraries on pyhton2. At the current time if you experience build difficulties of this sort, try dropping back to cmake-3.10.3, delete the contents of `~/op25/build/` and start over.
 
-**Note 3:** There is also a `./rebuild.sh` script that will (optionally) update & rebuild op25, local changes must be committed or reverted for update to happen.
 
-
-## 1. Install op25
+## 1. Install op25-sndcp decoder
 
 ```
 sudo apt-get install git
 cd ~
-git clone https://github.com/boatbod/op25
+git clone https://github.com/russinnes/op25-sndcp-packet-decoder.git
 cd op25
 ./install.sh 
 ```

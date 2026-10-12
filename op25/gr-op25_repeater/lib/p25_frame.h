@@ -30,6 +30,9 @@ namespace gr {
 static const size_t P25_VOICE_FRAME_SIZE = 1728;
 static const size_t P25_HEADER_SYMBOLS = 24 + 32 + 1;
 static const size_t P25_HEADER_BITS = P25_HEADER_SYMBOLS * 2;
+// p25_frame.h, alongside P25_VOICE_FRAME_SIZE
+static const size_t P25_PDU_FRAME_SIZE = 3600; //necessary to avoid missing PDUs
+
 
 /* Given a 64-bit frame header word and a frame body which is to be initialized
  * 1. Place flags at beginning of frame body

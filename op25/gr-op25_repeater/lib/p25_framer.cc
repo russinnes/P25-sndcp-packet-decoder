@@ -28,7 +28,8 @@ static const int max_frame_lengths[16] = {
     0,	                    // 9 - VSELP "voice PDU"
     P25_VOICE_FRAME_SIZE,	// a - ldu2
     0,	                    // b - undef
-    962,	                // c - pdu (triple data block MBT)
+    31000,  // c - pdu -- was 962. The 53-byte keepalive (blks_hdr=4) needs
+            // ~1123-1152 raw bits
     0, 0,	                // d, e - undef
     432	                    // f - tdu
 };
@@ -49,7 +50,8 @@ p25_framer::p25_framer(log_ts& logger, int debug, int msgq_id) :
     nac(0),
     duid(0),
     parity(0),
-    frame_body(P25_VOICE_FRAME_SIZE)
+    //frame_body(P25_VOICE_FRAME_SIZE)
+    frame_body(P25_PDU_FRAME_SIZE)
 {
 }
 
@@ -170,10 +172,15 @@ bool p25_framer::rx_sym(uint8_t dibit) {
     if (nid_syms > 0) // if nid accumulation in progress
         nid_syms++; // count symbols in nid
 
+//     if(check_frame_sync((nid_accum & P25_FRAME_SYNC_MASK) ^ P25_FRAME_SYNC_MAGIC, 6, 48)) {
+//         nid_syms = 1;
+//     }
+
     if(check_frame_sync((nid_accum & P25_FRAME_SYNC_MASK) ^ P25_FRAME_SYNC_MAGIC, 6, 48)) {
         nid_syms = 1;
+        if (d_debug >= 11)
+            fprintf(stderr, "D-FS: %s p25_framer::rx_sym() sync found\n", logts.get(d_msgq_id));
     }
-
     if (next_bit > 0) {
         frame_body[next_bit++] = (dibit >> 1) & 1;
         frame_body[next_bit++] =  dibit       & 1;

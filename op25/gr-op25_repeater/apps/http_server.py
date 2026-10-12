@@ -18,6 +18,8 @@
 # Software Foundation, Inc., 51 Franklin Street, Boston, MA
 # 02110-1301, USA.
 
+# Modified for dual-chaser for SNDCP Russ Innes
+
 import sys
 import os
 import time
@@ -95,8 +97,14 @@ def post_req(environ, start_response, postdata):
     # Each POST_REQ should result in one Response
     resp_msg = []
     valid_resp = False
+    # 200 ms patch: only wait for a reply when the request can produce one
+    try:
+        _wants_reply = any(str(_d.get('command', _d.get('cmd'))) in ('update', 'get_terminal_config')
+                           for _d in json.loads(postdata))
+    except Exception:
+        _wants_reply = True
     t_expiry = time.time() + 0.2
-    while valid_req and not valid_resp and (time.time() < t_expiry):  # wait for a message or timeout
+    while valid_req and _wants_reply and not valid_resp and (time.time() < t_expiry):  # wait for a message or timeout
         if (len(my_recv_q) > 0):
             with u_mutex:
                 with q_mutex:

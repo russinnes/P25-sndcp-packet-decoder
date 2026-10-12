@@ -219,6 +219,8 @@ class channel(object):
                              relative_freq = ((dev.frequency + dev.offset + dev.fractional_corr) - self.frequency),
                              offset = dev.offset,
                              if_rate = config['if_rate'],
+                             gain_mu = float(from_dict(config, 'gain_mu', p25_demodulator._def_gain_mu)),
+                             costas_alpha = float(from_dict(config, 'costas_alpha', p25_demodulator._def_costas_alpha)),
                              symbol_rate = self.symbol_rate)
         else:                             # P25, DMR, NXDN and everything else
             self.demod = p25_demodulator.p25_demod_cb(
@@ -232,6 +234,8 @@ class channel(object):
                              relative_freq = ((dev.frequency + dev.offset + dev.fractional_corr) - self.frequency),
                              offset = dev.offset,
                              if_rate = config['if_rate'],
+                             gain_mu = float(from_dict(config, 'gain_mu', p25_demodulator._def_gain_mu)),
+                             costas_alpha = float(from_dict(config, 'costas_alpha', p25_demodulator._def_costas_alpha)),
                              symbol_rate = self.symbol_rate)
         self.decoder = op25_repeater.frame_assembler(str(config['destination']), verbosity, msgq_id, rx_q)
 
@@ -487,6 +491,18 @@ class channel(object):
         self.device.fractional_corr = int((int(round(self.device.ppm)) - self.device.ppm) * (self.device.frequency/1e6))
         self.demod.set_relative_frequency(self.device.offset + self.device.frequency + self.device.fractional_corr - self.frequency)
         self.demod.reset()          # reset gardner-costas tracking loop
+
+    def set_dwell_rid(self, rid):
+        # Fixed-frequency multi-channel operation (multi_rx.py): each
+        # channel keeps its own permanently-tuned p25p1_fdma instance
+        # (see the per-instance RidReasm fix in p25p1_fdma.h/.cc), so
+        # unlike rx.py's single-SDR retune model there's no tune event
+        # here to hang this off of -- the caller (uniden_tsbk_monitor.py,
+        # via process_qmsg's 'set_dwell_rid' case below) already knows
+        # which tuner index this RID's channel is and calls this directly
+        # on a grant/page, same as it previously called http_set_dwell_rid()
+        # against the single-channel decoder.
+        self.decoder.control(json.dumps({'tuner': self.msgq_id, 'cmd': 'set_dwell_rid', 'rid': int(rid)}))
 
     def configure_p25_tdma(self, params):
         set_tdma = False
@@ -880,6 +896,15 @@ class rx_block (gr.top_block):
             msgq_id = int(msg.arg2())
             self.find_channel(msgq_id).adj_tune(freq)
             ui_rsp.append({'json_type': "ok", 'uuid': m_uuid})
+        elif s == 'set_dwell_rid':
+            # arg1=rid, arg2=tuner (msgq_id) -- same arg1/arg2 convention
+            # as adj_tune/toggle_plot above. Caller (uniden_tsbk_monitor.py)
+            # resolves ch_t -> tuner index itself via a static lookup table,
+            # since these channels are fixed frequencies, not retuned.
+            rid = int(msg.arg1())
+            msgq_id = int(msg.arg2())
+            self.find_channel(msgq_id).set_dwell_rid(rid)
+            ui_rsp.append({'json_type': "ok", 'uuid': m_uuid})
         elif s == 'set_debug':
             dbglvl = int(msg.arg1())
             self.set_debug(dbglvl)
@@ -1052,7 +1077,9 @@ class rx_main(object):
         parser.add_option("-v", "--verbosity", type="int", default=0, help="message debug level")
         parser.add_option("-p", "--pause", action="store_true", default=False, help="block on startup")
         parser.add_option("-d", "--dev-mode", action="store_true", default=False, help="enable developer mode")
+        parser.add_option("--sndcp-debug", type="int", default=0, help="1 = print all SNDCP/PDU diagnostics from p25p1_fdma (default 0: recovered text only)")
         (options, args) = parser.parse_args()
+        os.environ["P25_SNDCP_DEBUG"] = str(options.sndcp_debug)
 
         #if options.dev_mode:
         #    globals()["p25_demodulator"] = importlib.import_module("p25_demodulator_dev")
