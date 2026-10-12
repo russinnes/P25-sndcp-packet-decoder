@@ -2179,10 +2179,11 @@ namespace gr {
 
             for (int bl_cnt = 0; bl_cnt < bl_len; bl_cnt++) {
                 dbuf.push_back({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-                if (block_deinterleave(bv, 48 + 64 + bl_cnt * 196, dbuf[bl_cnt].data()) != 0) {
+                /*  -Dont log the 1/2 trellis issue now, pointless as fails here are actually d3/4 trellis-
+                    if (block_deinterleave(bv, 48 + 64 + bl_cnt * 196, dbuf[bl_cnt].data()) != 0) {
                     DBGP("%s process_blocks trellis1/2 fail blk=%d (kept)\n",
                             logts.get(d_msgq_id), bl_cnt);
-                }
+                }*/
             }
 
             if (dbuf.size() >= 1) {
