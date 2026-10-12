@@ -314,7 +314,7 @@ Start both decoders, wait for the controller to print `CHANNEL PLAN` lines (the 
 seconds), then it begins chasing.
 
 ### What to expect
-
+* Not all agencies use packet data / TMS etc. The traffic may simply not exist. 
 * Texts to a radio are sent once **per radio**, a few seconds apart. Retune timing is the gap.
 * The controller logs every chase with `grant → tune-done → first decode` timing and counts grants it
   could not take because it was busy (`BUSY-MISS`).
