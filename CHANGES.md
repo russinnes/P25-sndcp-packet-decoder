@@ -124,7 +124,7 @@ lone printable byte in a binary buffer is noise, so a minimum run length is requ
 **Other ports.** Text is not restricted to 4007. For any destination port other than 4007, 4005 or
 64414, a datagram whose payload yields at least 4 extractable characters is printed as `TMS_TEXT` and
 exported on UDP 51003 with its true `port` (also the `partial` preview path). This is how non-Motorola
-text, such as BK Technologies / RELM radios, is captured. The trade-off is that it is a *shape* test,
+text, is captured. The trade-off is that it is a *shape* test,
 not a protocol test, so an unrelated service whose payload happens to contain a run of printable bytes
 can appear in the feed. Consumers should filter on `port`. The `LEDGER` line counts such datagrams
 (`port_other`, `other_port_no_text`) and `LEDGER-FMT` lists up to 8 distinct "other" destination
