@@ -20,22 +20,8 @@ whole of this work.
 | Several channels in one process | shared global state | per-instance state; one decoder per channel |
 | Health visibility | `nid` counters only in debug | `STATS`, `LEDGER`, NID ring, `ACK-NODL` lines |
 
-## 2. File-by-file summary
 
-| File | Size vs upstream | Nature of change |
-|---|---|---|
-| `lib/p25p1_fdma.cc` | 798 → 2909 lines (~2,160 added, ~50 removed/changed) | the substance — see §3–§9 |
-| `lib/p25p1_fdma.h` | 136 → 163 lines | `RidReasm` struct moved in as a member; `set_dwell_rid()`; `#include`s |
-| `lib/rx_sync.cc` | one hunk, ~17 lines | deliver a PDU body when the sync window expires — §10 |
-| `lib/p25_frame_assembler_impl.cc` | 173 → 193 lines | guard `control()` against exceptions; route `set_dwell_rid` — §11 |
-| `apps/multi_rx.py` | +25 lines | pass `gain_mu`/`costas_alpha` per device; `set_dwell_rid` plumbing — §12 |
-| `apps/http_server.py` | +57 lines | fire-and-forget commands no longer wait for a reply — §13 |
-| `apps/rx.py` | **to be diffed against the pinned commit** | see §14 |
-| `apps/p25_demodulator.py`, `apps/trunking.py`, `lib/rx_sync.h`, `lib/p25_frame_assembler_impl.h` | **verify** | these were byte-identical between our two machines; run the diff script to see what, if anything, differs from upstream |
-
-New (not in OP25): `dual_chaser.py`, `gain_sweep.py`, `nidshare.sh`, example JSON configs.
-
-## 3. Rate-3/4 trellis decoding of confirmed data blocks
+## 2. Rate-3/4 trellis decoding of confirmed data blocks
 
 **What.** `block_deinterleave_34()` (new). Same 196-bit interleave table as stock's rate-1/2
 `block_deinterleave()`, but the 196 coded bits are viterbi-decoded as a 3/4-rate trellis (49 tribits →
