@@ -4,7 +4,7 @@
 
 Stock OP25 is built to follow **voice**. Its P25 Phase 1 data-PDU path is minimal: it decodes
 rate-1/2 trellis blocks (unconfirmed data and control PDUs), and it stops at the first block that fails.
-AFRRCS dispatch texts (Motorola TMS) travel as **confirmed data** — rate-3/4 trellis blocks, each with
+PDU texts (Motorola TMS, others) travel as **confirmed data** — rate-3/4 trellis blocks, each with
 its own CRC-9, wrapped in SNDCP / IPv4 / UDP (port 4007) and carrying UTF-16LE text. Stock OP25
 cannot decode those blocks, so the texts were invisible. Making them visible, and then making the
 decode *reliable* (a lost block means a lost page, with no voice-style redundancy to cover it), is the
