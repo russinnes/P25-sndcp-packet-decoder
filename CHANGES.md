@@ -26,7 +26,7 @@ whole of this work.
 **What.** `block_deinterleave_34()` (new). Same 196-bit interleave table as stock's rate-1/2
 `block_deinterleave()`, but the 196 coded bits are viterbi-decoded as a 3/4-rate trellis (49 tribits →
 18 octets: 2 octets of serial number + CRC-9, then 16 data octets). Tables are TIA-102.BAAA-A
-Table 7-2 (cross-checked with the tribit state machine in `kchmck/p25.rs`).
+Table 7-2 (thanks to the tribit state machine in `kchmck/p25.rs`).
 
 **Acceptance rule.** The Viterbi path cost gives a quality number. A block is accepted when
 `cost <= 8`, **or** when `cost > 8` but its CRC-9 passes (`d34_rescued`). A radio accepts a block on its
@@ -35,7 +35,7 @@ radio genuinely received. A block with `cost <= 8` but a bad CRC-9 is *kept and 
 (`d34_crc_bad`) rather than dropped, because the packet-level CRC-32 (§5) is the final arbiter.
 
 **CRC-9.** `blk_crc9_ok()`: generator `x^9+x^6+x^4+x^3+1` over the 7-bit serial number plus 16 data
-octets, result inverted. Verified against 1680/1680 real blocks. It is a *real* check — random noise
+octets, result inverted. It is a *real* check — random noise
 passes it 1 time in 512 — which is why later salvage logic (§4) uses it as a gate.
 
 **Why it matters.** Without this there is no text at all.
@@ -56,8 +56,7 @@ Changes in `process_blocks()`:
    of being discarded. Because each channel now has its own decoder with its own reassembly state (§7),
    the cached RID can only have come from traffic actually heard on that channel.
 3. **Header CRC fail, no session ("headless" bursts).** Decode the data blocks anyway and gate
-   acceptance on the *data* looking real: Viterbi cost, a serial number in range (observed FSNs run
-   0–37; 3 of 36,372 accepted blocks exceeded 127, so the check is `< 128`), and, once reassembled,
+   acceptance on the *data* looking real: Viterbi cost, a serial number in range and, once reassembled,
    an IPv4/UDP shape. The RID is attributed from the failed header only as a clearly-marked guess, or 0.
    A page with no RID is still better than a silent drop.
 4. **All-zero header with a text-sized burst** (seen: 18 blocks, the second radio's copy of a
@@ -95,7 +94,7 @@ one case the older path could not handle.
 * **Window** `REASM_WINDOW_SEC` raised 2.0 → 4.0 s so RF fades and repeater turnaround between bursts
   of one session do not split it. Trade-off: two genuinely separate bursts to one RID are more likely
   to be glued; the symptom is a wrong IP version nibble or nonsense ports in `REASM` output.
-* **New-datagram detection.** If the buffer holds an unfinished datagram and the next burst's first
+* **Datagram detection.** If the buffer holds an unfinished datagram and the next burst's first
   block starts with an SNDCP header (`51 00`) + IPv4 header, that is a *new* datagram (usually a
   retransmission). It is closed as unfinished and a fresh one started. Previously it was appended,
   producing bogus `00 02 51 00` ("Q") replies.
@@ -133,7 +132,7 @@ ports with counts; datagrams on a port that produced no text are counted but not
 Port handling: **4007** is Motorola TMS, **4005** ARS, **64414** OTAR/KMM key management
 and keepalive "beacons" (never text; they carry the sender's own RID at a fixed offset, which gives a
 free consistency check). Datagrams of 3–4 bytes on 4005/4007 (`00 01 3f`, `00 02 70 00`) are binary
-control packets, not text; previously `0x70` printed as the letter "p".
+control packets, not text.
 
 `partial` previews: while a message is provably incomplete but a valid IP+UDP header and some payload
 exist, the text so far is printed and exported flagged `partial:true`, and refreshed as more bursts
@@ -142,7 +141,7 @@ arrive.
 ## 7. Per-channel state (needed for `multi_rx.py`)
 
 Upstream keeps reassembly state in a single file-scope global. With one decoder (`rx.py`, retuned
-SDR) that is harmless. In `multi_rx.py` there is one `p25p1_fdma` per fixed-frequency channel in the
+SDR) that is harmless. In `multi_rx.py` there is one `p25p1_fdma` decoder per fixed-frequency channel in the
 **same process**, so two radios landing PDU bursts on different channels within the window would
 interleave into one buffer and corrupt both. `RidReasm` is now a member of `p25p1_fdma`
 (`p25p1_fdma.h`), and per-channel diagnostics are arrays indexed by `msgq_id & 15` (so up to 16
@@ -165,7 +164,7 @@ Also: failed TSBKs are now logged with their raw bytes, and `bytes[7:10]` is ann
 ## 9. Diagnostics
 
 All are log lines on stderr from the decoder. Quiet by default (§ env vars): only recovered text
-reaches stderr unless `P25_SNDCP_DEBUG=1`.
+reaches stderr unless `P25_SNDCP_DEBUG=1`. Don't ignore this flag!
 
 * **`STATS`** (periodic, from `load_nid`): `nid_ok`, `nid_fail`, `pdu_attempted/passed`, `reasm_*`,
   `pkt_*`, `d34_*`, `ack_nodl`, `duid_*`. 
