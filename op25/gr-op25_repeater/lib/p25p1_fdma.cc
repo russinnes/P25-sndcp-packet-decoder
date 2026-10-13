@@ -35,6 +35,7 @@
 #include <array>
 #include <map>
 #include <mutex>
+#include <atomic>
 #include <algorithm>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -117,20 +118,36 @@ namespace gr {
             }
         }
 
-        /* Diagnostics counters, indexed by msgq_id & 15 (one p25p1_fdma per
+        /* v8.4: per-channel diagnostic slots. This was 16 wide and indexed by
+         * msgq_id & 15, so any process with more than 16 channels (multi_rx
+         * with 30, say) silently folded channel 16 onto 0, 17 onto 1, ... and
+         * shared their counters, NID ring, last-downlink table and the
+         * HDRFAIL->ACK slot. Must be a power of two. */
+        static const int MAX_CH = 64;
+        static_assert((MAX_CH & (MAX_CH - 1)) == 0, "MAX_CH must be a power of two");
+        static inline int ch_idx(int id)
+        {
+            static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+            if (id >= MAX_CH && !warned.test_and_set())
+                fprintf(stderr, "p25p1_fdma: WARNING msgq_id %d >= MAX_CH %d: "
+                                "per-channel diagnostics will alias\n", id, MAX_CH);
+            return id & (MAX_CH - 1);
+        }
+
+        /* Diagnostics counters, indexed by ch_idx(msgq_id) (one p25p1_fdma per
          * fixed-frequency channel in multi_rx.py). Printed periodically as a
          * "STATS" line from load_nid(). Static file-scope so the .h is
          * unchanged. */
-        static uint64_t g_stat_discard[16]   = {0};   /* unfinished reassembly abandoned */
-        static uint64_t g_stat_supersede[16] = {0};   /* short burst replaced by a new datagram start */
-        static uint64_t g_stat_nid_ok[16]    = {0};
-        static uint64_t g_stat_nid_fail[16]  = {0};
-        static double   g_stat_last_ts[16]   = {0};
-        static uint64_t g_stat_pkt_ok[16]        = {0};   /* complete first copy, packet CRC32 ok */
-        static uint64_t g_stat_pkt_fail[16]      = {0};   /* complete but packet CRC32 failed */
-        static uint64_t g_stat_pkt_merged[16]    = {0};   /* completed/repaired by merging a retry */
-        static uint64_t g_stat_pkt_incomplete[16]= {0};   /* first copy never completed (blocks missing) */
-        static uint64_t g_stat_retry_noorig[16]  = {0};   /* retry seen, first transmission never seen */
+        static uint64_t g_stat_discard[MAX_CH]   = {0};   /* unfinished reassembly abandoned */
+        static uint64_t g_stat_supersede[MAX_CH] = {0};   /* short burst replaced by a new datagram start */
+        static uint64_t g_stat_nid_ok[MAX_CH]    = {0};
+        static uint64_t g_stat_nid_fail[MAX_CH]  = {0};
+        static double   g_stat_last_ts[MAX_CH]   = {0};
+        static uint64_t g_stat_pkt_ok[MAX_CH]        = {0};   /* complete first copy, packet CRC32 ok */
+        static uint64_t g_stat_pkt_fail[MAX_CH]      = {0};   /* complete but packet CRC32 failed */
+        static uint64_t g_stat_pkt_merged[MAX_CH]    = {0};   /* completed/repaired by merging a retry */
+        static uint64_t g_stat_pkt_incomplete[MAX_CH]= {0};   /* first copy never completed (blocks missing) */
+        static uint64_t g_stat_retry_noorig[MAX_CH]  = {0};   /* retry seen, first transmission never seen */
         static uint64_t g_stat_d34_rescued    = 0;   /* Viterbi cost>8 but block CRC-9 passed: accepted */
         static uint64_t g_stat_d34_crc_bad    = 0;   /* cost<=8 but block CRC-9 failed (kept, as before) */
         static uint64_t g_stat_d34_crc_ok     = 0;   /* block CRC-9 passed (any cost) */
@@ -146,17 +163,17 @@ namespace gr {
          * that was detected but never completed. */
         struct NidEv { double ts; uint8_t ok; uint8_t duid; uint16_t nac; uint16_t fr_len; uint8_t processed; };
         static const int NID_RING = 64;
-        static NidEv    g_nid_ring[16][NID_RING];
-        static uint32_t g_nid_cnt[16] = {0};
-        static uint64_t g_stat_duid[16][16] = {{0}};
-        static uint64_t g_stat_nodl[16] = {0};
-        static std::map<uint32_t, double> g_last_dl[16];
+        static NidEv    g_nid_ring[MAX_CH][NID_RING];
+        static uint32_t g_nid_cnt[MAX_CH] = {0};
+        static uint64_t g_stat_duid[MAX_CH][16] = {{0}};
+        static uint64_t g_stat_nodl[MAX_CH] = {0};
+        static std::map<uint32_t, double> g_last_dl[MAX_CH];
         /* how many body chunks / symbols load_body() was given for the frame
          * currently in progress, so a frame that is detected (NID ok) but never
          * completed can be reported with what it actually received. */
-        static uint32_t g_body_calls[16] = {0};
-        static uint64_t g_body_syms[16]  = {0};
-        static uint64_t g_stat_abandoned[16] = {0};
+        static uint32_t g_body_calls[MAX_CH] = {0};
+        static uint64_t g_body_syms[MAX_CH]  = {0};
+        static uint64_t g_stat_abandoned[MAX_CH] = {0};
         /* ---- : header-failed PDUs -------------------------------------
          * When a PDU's 12-byte header block fails CRC the burst has no RID, so
          * neither the log nor the TMS export can say which radio it was for.
@@ -165,13 +182,13 @@ namespace gr {
          * blocks) and link it to the next ACK on the same channel. */
         struct HdrFail  { double ts; uint32_t nblk; int linked; };
         struct SalvText { double ts; int valid; int verified; char text[600]; };
-        static HdrFail  g_hdrfail[16];
-        static SalvText g_salv_tmp[16];          /* filled by reasm_print_ip(salvage) */
-        static SalvText g_salv[16];              /* stamped copy used for ACK linking */
-        static int      g_salv_clean_next[16];   /* caller: every accepted block passed CRC-9 */
-        static uint64_t g_stat_hdrfail[16]     = {0};
-        static uint64_t g_stat_hdrfail_big[16] = {0};
-        static uint64_t g_stat_attrib[16]      = {0};
+        static HdrFail  g_hdrfail[MAX_CH];
+        static SalvText g_salv_tmp[MAX_CH];          /* filled by reasm_print_ip(salvage) */
+        static SalvText g_salv[MAX_CH];              /* stamped copy used for ACK linking */
+        static int      g_salv_clean_next[MAX_CH];   /* caller: every accepted block passed CRC-9 */
+        static uint64_t g_stat_hdrfail[MAX_CH]     = {0};
+        static uint64_t g_stat_hdrfail_big[MAX_CH] = {0};
+        static uint64_t g_stat_attrib[MAX_CH]      = {0};
 
         /* Pure counters (no behaviour change): classifies every PDU frame the
          * framer hands over, every IP datagram built from them, and every text printed,
@@ -186,7 +203,7 @@ namespace gr {
             uint32_t fs[32][64];              /* header fmt x sap histogram */
             uint64_t oport[8]; uint32_t oport_n; uint16_t oport_v[8]; /* distinct "other" dports */
         };
-        static Ledger g_led[16];
+        static Ledger g_led[MAX_CH];
         static bool ledger_enabled() {
             static int v = -1;
             if (v < 0) { const char* e = getenv("P25_LEDGER"); v = (e && atoi(e) == 0 && e[0] == '0') ? 0 : 1; }
@@ -438,7 +455,7 @@ namespace gr {
              * as an ordinary, fully-verified decode, and never hand it to
              * tms_export() -- that's for verified content only. */
             const char* tag = salvage ? "SALVAGE_" : "";
-            Ledger& LD = g_led[msgq_id & 15];
+            Ledger& LD = g_led[ch_idx(msgq_id)];
             if (iplen < 20) {
                 LD.ip_tiny++;
                 return;
@@ -587,7 +604,7 @@ namespace gr {
 
             /* remember a salvaged text so the next ACK on this channel can name the radio. */
             if (salvage && dport == 4007 && pay > 4) {
-                int sci = msgq_id & 15;
+                int sci = ch_idx(msgq_id);
                 g_salv_tmp[sci].valid = 1;
                 g_salv_tmp[sci].verified = (g_salv_clean_next[sci] && ipck_ok && have_raw >= (int)tot) ? 1 : 0;
                 snprintf(g_salv_tmp[sci].text, sizeof(g_salv_tmp[sci].text), "%s", text_buf);
@@ -777,7 +794,7 @@ namespace gr {
         {
             reasm_dump(r, msgq_id, ts);
             if (r.buf.size() >= 20) {
-                g_stat_discard[msgq_id & 15]++;
+                g_stat_discard[ch_idx(msgq_id)]++;
                 DBGP("%s [%d] REASM DISCARD rid=%u bytes=%zu reason=%s "
                         "(unfinished datagram abandoned)\n",
                         ts, msgq_id, r.rid, r.buf.size(), reason);
@@ -821,7 +838,7 @@ namespace gr {
                  * "51 00" onto the old datagram's missing tail, producing
                  * the bogus "00 02 51 00" ('Q') replies. Close the old one as
                  * unfinished and start fresh. */
-                g_stat_supersede[msgq_id & 15]++;
+                g_stat_supersede[ch_idx(msgq_id)]++;
                 reasm_flush(r, msgq_id, ts, "superseded_by_new_datagram");
             }
 
@@ -911,7 +928,7 @@ namespace gr {
             int      ns   = (hdr[8] >> 4) & 7;
             int      fsnf = hdr[8] & 0x0f;
             int      dho  = hdr[9] & 0x3f;
-            int      ci   = msgq_id & 15;
+            int      ci   = ch_idx(msgq_id);
             if (blks < 1 || blks > 127 || n34 < 0 || n34 > 32)
                 return;
 
@@ -926,7 +943,7 @@ namespace gr {
                 for (auto it = g_pkt.begin(); it != g_pkt.end();) {
                     if (now - it->second.last_ts > PKT_WINDOW_SEC) {
                         if (!it->second.done) {
-                            g_stat_pkt_incomplete[it->second.msgq_id & 15]++;
+                            g_stat_pkt_incomplete[ch_idx(it->second.msgq_id)]++;
                             DBGP("%s [%d] PKT INCOMPLETE llid=%u sap=%d have=%d/%d blocks "
                                     "(first copy never completed, no retry filled the gap)\n",
                                     ts, it->second.msgq_id, it->second.llid, it->second.sap,
@@ -1881,7 +1898,7 @@ namespace gr {
             uint8_t fmt, sap, blks, op = 0;
             block_vector deinterleave_buf;
             d_stat_pdu_attempted++;
-            Ledger& LP = g_led[d_msgq_id & 15];
+            Ledger& LP = g_led[ch_idx(d_msgq_id)];
             LP.pdu_in++;
 
             //int rc = process_blocks(fr, fr_len, deinterleave_buf);
@@ -1930,7 +1947,7 @@ namespace gr {
                 DBGP("\n");
                 {
                     /* remember this header-less PDU so the ACK that follows can name the radio */
-                    int hci = d_msgq_id & 15;
+                    int hci = ch_idx(d_msgq_id);
                     g_stat_hdrfail[hci]++;
                     /* a 1-2 block header failure is almost always a damaged ACK, not
                      * data -- don't let it be "linked" to the next radio's ACK */
@@ -1962,7 +1979,7 @@ namespace gr {
                 uint32_t r = ((uint32_t)deinterleave_buf[0][3] << 16) |
                              ((uint32_t)deinterleave_buf[0][4] << 8)  |
                               (uint32_t)deinterleave_buf[0][5];
-                std::map<uint32_t, double>& m = g_last_dl[d_msgq_id & 15];
+                std::map<uint32_t, double>& m = g_last_dl[ch_idx(d_msgq_id)];
                 if (m.size() > 4096) m.clear();
                 m[r] = logts.get_ts();
             }
@@ -1998,7 +2015,7 @@ namespace gr {
                  * "probable" because an unrelated radio's ACK could in principle land
                  * first -- dt is printed so that can be judged. */
                 if (fmt == 0x03 && blks == 0) {
-                    int hci = d_msgq_id & 15;
+                    int hci = ch_idx(d_msgq_id);
                     double tnow = logts.get_ts();
                     HdrFail& hf = g_hdrfail[hci];
                     if (hf.ts > 0 && !hf.linked && (tnow - hf.ts) >= 0 && (tnow - hf.ts) <= HDRFAIL_ACK_WIN) {
@@ -2026,7 +2043,7 @@ namespace gr {
                  * always, and the detection ring for the RID range given by
                  * P25_TRACE_RIDS. */
                 if (fmt == 0x03 && blks == 0) {
-                    int ci = d_msgq_id & 15;
+                    int ci = ch_idx(d_msgq_id);
                     double now_t = logts.get_ts();
                     std::map<uint32_t, double>::iterator it = g_last_dl[ci].find(rid);
                     double age = (it == g_last_dl[ci].end()) ? -1.0 : (now_t - it->second);
@@ -2179,10 +2196,11 @@ namespace gr {
 
             for (int bl_cnt = 0; bl_cnt < bl_len; bl_cnt++) {
                 dbuf.push_back({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-                if (block_deinterleave(bv, 48 + 64 + bl_cnt * 196, dbuf[bl_cnt].data()) != 0) {
-                    DBGP("%s process_blocks trellis1/2 fail blk=%d (kept)\n",
-                            logts.get(d_msgq_id), bl_cnt);
-                }
+                /* Don't log the 1/2 trellis result: for confirmed data blocks it
+                 * "fails" by design (they are rate-3/4, decoded again below), so
+                 * the message was noise. The CALL must stay: it fills dbuf[],
+                 * which holds the header (crc16 below) and any TSBK blocks. */
+                (void)block_deinterleave(bv, 48 + 64 + bl_cnt * 196, dbuf[bl_cnt].data());
             }
 
             if (dbuf.size() >= 1) {
@@ -2284,7 +2302,7 @@ namespace gr {
                          * own CRC-9 and a datagram whose IPv4 header checksum is valid;
                          * noise cannot pass both. */
                         const bool strict = header_ghost && (bl_len - 1) >= 8;
-                        const int sci = d_msgq_id & 15;
+                        const int sci = ch_idx(d_msgq_id);
 
                         if (!header_ghost || strict) {
                             uint8_t d34[32][18];
@@ -2591,7 +2609,7 @@ namespace gr {
 
         void p25p1_fdma::process_frame() {
             {
-                int ci = d_msgq_id & 15;
+                int ci = ch_idx(d_msgq_id);
                 if (g_nid_cnt[ci] > 0)
                     g_nid_ring[ci][(g_nid_cnt[ci] - 1) % NID_RING].processed = 1;
             }
@@ -2671,7 +2689,7 @@ namespace gr {
         uint32_t p25p1_fdma::load_nid(const uint8_t *syms, int nsyms, const uint64_t fs) {
             uint32_t fr_len = framer->load_nid(syms, nsyms, fs);
             {
-                int ci = d_msgq_id & 15;
+                int ci = ch_idx(d_msgq_id);
                 if (fr_len == 0) g_stat_nid_fail[ci]++; else g_stat_nid_ok[ci]++;
                 if (g_nid_cnt[ci] > 0) {
                     const NidEv& pv = g_nid_ring[ci][(g_nid_cnt[ci] - 1) % NID_RING];
@@ -2749,7 +2767,7 @@ namespace gr {
         // Load remainder of frame body (used by multi_rx.py)
         bool p25p1_fdma::load_body(const uint8_t *syms, int nsyms) {
             {
-                int ci = d_msgq_id & 15;
+                int ci = ch_idx(d_msgq_id);
                 g_body_calls[ci]++;
                 g_body_syms[ci] += (nsyms > 0 ? (uint64_t)nsyms : 0);
             }
