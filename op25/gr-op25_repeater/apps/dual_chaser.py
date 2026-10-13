@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-dual_chaser.py -- two-SDR "wait and chase" controller for AFRRCS data grants.
+dual_chaser.py -- two-SDR "wait and chase" controller for P25 Phase 1 data grants.
 
     SDR #1  (OP25 instance A): parked on the control channel forever,
             exports every TSBK to UDP 127.0.0.1:51002 (already done by
             p25p1_fdma.cc's tsbk_export).  Never retuned.
     SDR #2  (OP25 instance B): the chaser.  This script retunes it on
-            each data grant for a 411xxxx radio, holds while OP25 reports
+            each data grant for a radio in the target RID range, holds while OP25 reports
             decoded activity (UDP 51001 HOLD, 51003 TMS text), then lets
             it sit where it is (or goes --home-hz).
 
@@ -50,15 +50,15 @@ OPCODES = {
     0x15: ("DATA_PAGE", "SN_DATA_PAGE_REQ"),
 }
 INVALID_CH = {0, 0xFFFF}
-# Fallback plan, used ONLY with --assume-afrrcs-plan (the Alberta AFRRCS 700 MHz plan).
+# Fallback plan, used ONLY with --assume-afrrcs-plan (a 700 MHz plan: base 769.08125 MHz, 12.5 kHz spacing, +30 MHz transmit offset).
 # Normally the plan comes from the tower itself (IDEN_UP / IDEN_UP_VU, see Chaser.iden).
 ASSUME_PLAN = {0: {"base_hz": 769081250, "spacing_hz": 12500, "toff_hz": 30000000}}
 
 
 def parse_iden(tsbk, opcode):
     """TIA-102.AABC-B 6.2.9 (IDEN_UP, 0x3D) / 6.2.29 (IDEN_UP_VU, 0x34).
-    `tsbk` is the 96-bit value (10 octets + 16 CRC bits zero).  Verified against a live AFRRCS
-    capture: BD000325E064092B0CBA -> iden 0, base 769.08125 MHz, spacing 12.5 kHz, tx +30 MHz."""
+    `tsbk` is the 96-bit value (10 octets + 16 CRC bits zero).  Verified against a live capture from a 700 MHz
+    system: BD000325E064092B0CBA -> iden 0, base 769.08125 MHz, spacing 12.5 kHz, tx +30 MHz."""
     v = tsbk >> 16
     iden = (v >> 60) & 0xF
     spacing = (v >> 32) & 0x3FF
@@ -350,9 +350,34 @@ class Chaser:
                 self.log("  first decode rid=%s  %.0f ms after grant (%.0f ms after tune done)" % (
                     rid, lat, (now - self.t_tuned) * 1000.0))
 
-    def on_tms(self, rid, text, partial, now=None):
+    def _save_text(self, now, rid, text, partial, port=None):
+        """Print every TMS text the decoder reports and append it to --text-log
+        (one JSON object per line), whether or not a chase is active."""
+        t = text.strip()
+        if not t:
+            return
+        key = (rid, t, bool(partial))
+        if getattr(self, "_last_text", None) and self._last_text[0] == key and now - self._last_text[1] < 60:
+            return                                   # same exact text re-reported (retries)
+        self._last_text = (key, now)
+        self.c["texts_logged"] += 1
+        ch = self.ch if (self.mode == "CHASE" and rid == self.rid) else None
+        self.log("TEXT rid=%s%s%s%s: %s" % (rid, " ch=%s" % ch if ch else "", " port=%s" % port if port else "",
+                                            " [partial]" if partial else "", t))
+        path = getattr(self.a, "text_log", None)
+        if path:
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    rec = {"ts": datetime.fromtimestamp(now).astimezone().isoformat(timespec="milliseconds"),
+                           "rid": rid, "ch": ch, "port": port, "partial": bool(partial), "text": t}
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            except OSError as e:
+                self.log("text-log write failed: %s" % e)
+
+    def on_tms(self, rid, text, partial, now=None, port=None):
         now = time.time() if now is None else now
         with self.lock:
+            self._save_text(now, rid, text, partial, port)
             if self.mode != "CHASE" or rid != self.rid:
                 return
             self.last_activity = now          # any TMS export is decode activity
@@ -424,7 +449,8 @@ def live(args, ch):
     def tms(r):
         m = json.loads(r.decode())
         # p25p1_fdma's tms_export sends the text under "tms_text" (older builds: "text")
-        ch.on_tms(int(m["rid"]), str(m.get("tms_text", m.get("text", ""))), bool(m.get("partial", False)))
+        ch.on_tms(int(m["rid"]), str(m.get("tms_text", m.get("text", ""))), bool(m.get("partial", False)),
+                  port=m.get("port"))
     threading.Thread(target=listener, args=(51003, tms, 4096), daemon=True).start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -514,7 +540,7 @@ def main():
     ap.add_argument("--rid-range", type=parse_range, action="append", default=[], metavar="LO-HI",
                     help="only chase RIDs in this inclusive range (repeatable)")
     ap.add_argument("--assume-afrrcs-plan", action="store_true",
-                    help="use the built-in AFRRCS 700 MHz channel plan until the tower's IDEN_UP is heard")
+                    help="use the built-in 700 MHz channel plan until the tower's IDEN_UP is heard")
     ap.add_argument("--follow-opts0", action="store_true")
     ap.add_argument("--dwell-url", help="rx.py HTTP URL for set_dwell_rid (default: the --tune-http URL; "
                                         "needed with --tune-unix). Tells the decoder which RID each dwell is for.")
@@ -528,6 +554,7 @@ def main():
     ap.add_argument("--preempt-after", type=float, default=1.5,
                     help="a new grant for another radio may preempt a chase that has decoded nothing for this long")
     ap.add_argument("--routine-text-max", type=int, default=8)
+    ap.add_argument("--text-log", default="chaser_texts.jsonl", help="append every decoded TMS text here as JSON lines (empty string disables)")
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--tsbk-port", type=int, default=51002)
     ap.add_argument("--summary-every", type=float, default=300)
