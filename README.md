@@ -82,7 +82,7 @@ throwing away partial information ([CHANGES §4–5](CHANGES.md#4-not-throwing-d
 ### The timing problem
 
 The PDU begins up to roughly **500ms** after the grant. A single SDR that must *retune and re-lock*
-(about 190–400 ms in our measurements) will therefore **may miss the first copy**. What a chaser can still
+(about 190–400 ms in our measurements) and **may miss the first copy**. What a chaser can still
 catch is **almost all**, a repeat, or the later per-radio copies (a message to several radios is sent once
 per radio, a few seconds apart).
 Approach A has no such problem: every channel already has a receiver on it before the grant.
