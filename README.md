@@ -9,7 +9,7 @@ Two ways to run it, from the same decoder:
 |---|---|---|
 | Hardware | 1 × Airspy Mini (or any wideband SDR) | 2 × RTL-SDR |
 | Idea | one SDR covers *every* data channel at once; one decoder per channel | SDR 1 sits on the control channel; SDR 2 is retuned to each data grant |
-| Process | `multi_rx.py` | `multi_chaser.py` (supervises `multi_rx.py` + `rx.py`) |
+| Process | `multi_rx.py` | `multi_chaser.py` (supervises both SDR's) |
 | Catches the **first** transmission | yes | **usually** (see [the timing problem](#the-timing-problem)) |
 | Several sites | yes, if they fit the SDR's window | yes, one chaser follows data grants from every site you list |
 | Needs a channel plan | no | learned from the control channel |
