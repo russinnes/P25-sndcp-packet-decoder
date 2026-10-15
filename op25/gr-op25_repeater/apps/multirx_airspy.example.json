@@ -1,0 +1,54 @@
+{
+    "devices": [
+        {
+            "name": "rtl_a",
+            "args": "airspy=0,sensitivity=0,linearity=0,bias=0",
+            "rate": 6000000,
+            "frequency": 772643750,
+            "offset": 0,
+            "ppm": 4,
+            "gain_mode": false,
+            "gains": "LNA:14,MIX:10,IF:8",
+            "tunable": false,
+            "usable_bw_pct": 0.9
+        }
+    ],
+    "channels": [
+        {
+            "name": "TWR_771131",
+            "device": "rtl_a",
+            "frequency": 771131250,
+            "demod_type": "cqpsk",
+            "filter_type": "rrc",
+            "excess_bw": 0.2,
+            "if_rate": 24000,
+            "symbol_rate": 4800,
+            "enable_analog": "off",
+            "destination": "0.0.0.0:0",
+            "gain_mu": 0.04,
+            "costas_alpha": 0.02
+        },
+        {
+            "name": "TWR_771631",
+            "device": "rtl_a",
+            "frequency": 771631250,
+            "demod_type": "cqpsk",
+            "filter_type": "rrc",
+            "excess_bw": 0.2,
+            "if_rate": 24000,
+            "symbol_rate": 4800,
+            "enable_analog": "off",
+            "destination": "0.0.0.0:0",
+            "gain_mu": 0.04,
+            "costas_alpha": 0.02
+        },
+        {
+        .....n(X)
+        ..... 
+        }
+    ],
+    "terminal": {
+        "module": "terminal.py",
+        "terminal_type": "http:0.0.0.0:8085"
+    }
+}

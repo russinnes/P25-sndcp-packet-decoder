@@ -1,0 +1,49 @@
+{
+  "_comment": "Example for multi_chaser.py --config. Keys starting with _ are ignored. Everything not listed here has the default shown in the README. Remember to tune each first!",
+  "control_channels": {
+    "_comment": "SDR #1: one SDR listening to every control channel at once. They must all fit inside its sample-rate window.",
+    "device": {
+      "type": "rtl",
+      "serial": "00000001",
+      "ppm": 0,
+      "gains": "LNA:30"
+    },
+    "frequencies": [
+      {
+        "name": "SITE_A",
+        "frequency": 770.00625
+      },
+      {
+        "name": "SITE_B",
+        "frequency": 770.89375
+      }
+    ],
+    "sample_rate": "auto"
+  },
+  "chaser": {
+    "_comment": "SDR #2: retuned to each data channel. start_frequency is where it waits until the first grant: \"auto\" (the average of the control channels) or a frequency.",
+    "device": {
+      "type": "rtl",
+      "serial": "00000002",
+      "ppm": 0,
+      "gains": "LNA:25"
+    },
+    "start_frequency": "auto",
+    "sample_rate": 1000000
+  },
+  "policy": {
+    "_comment": "Which radios to chase. One or more LO-HI ranges (empty = everyone).",
+    "rid_ranges": [
+      "1000000-1009999"
+    ]
+  },
+  "channel_plan": {
+    "assume": "700mhz"
+  },
+  "paths": {
+    "_comment": "op25_dir is the OP25 apps/ directory (where rx.py and multi_rx.py live). Relative paths are relative to where you start multi_chaser.py.",
+    "op25_dir": ".",
+    "log_dir": "logs",
+    "text_log": "chaser_texts.jsonl"
+  }
+}
