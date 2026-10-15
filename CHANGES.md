@@ -59,13 +59,12 @@ Changes in `process_blocks()`:
    acceptance on the *data* looking real: Viterbi cost, a serial number in range and, once reassembled,
    an IPv4/UDP shape. The RID is attributed from the failed header only as a clearly-marked guess, or 0.
    A page with no RID is still better than a silent drop.
-4. **All-zero header with a text-sized burst** (seen: 18 blocks, the second radio's copy of a
-   dispatch). Earlier this was skipped as a "ghost burst". Now it is tried, but only blocks whose own
-   CRC-9 passes are accepted and only if the datagram's IPv4 header checksum is valid (`ip_hdr_cksum_ok`).
+4. **All-zero header with a text-sized burst** (Blocks whose own CRC-9 passes are accepted
+   and only if the datagram's IPv4 header checksum is valid (`ip_hdr_cksum_ok`).
    Noise cannot pass both.
-5. **Ghost-burst guard.** Large bursts whose decoded header is all zero except byte 0 (e.g.
+6. **Ghost-burst guard.** Large bursts whose decoded header is all zero except byte 0 (e.g.
    `76 c0 00 3c 00 …`, `nblk=20`) skip the Viterbi work entirely; they are noise, not a lost page.
-6. **HDRFAIL → ACK linking.** A header-failed PDU has no RID. The tower ACKs the receiving radio
+7. **HDRFAIL → ACK linking.** A header-failed PDU has no RID. The tower ACKs the receiving radio
    ~0.5 s later, and the ACK carries the RID. The failed PDU (and any text salvaged from it) is
    remembered per channel and linked to the next ACK within `HDRFAIL_ACK_WIN` = 1.2 s, printed as
    "probable" with the time delta so the reader can judge. 1–2 block failures are treated as damaged ACKs
