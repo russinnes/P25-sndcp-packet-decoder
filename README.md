@@ -9,8 +9,9 @@ Two ways to run it, from the same decoder:
 |---|---|---|
 | Hardware | 1 × Airspy Mini (or any wideband SDR) | 2 × RTL-SDR |
 | Idea | one SDR covers *every* data channel at once; one decoder per channel | SDR 1 sits on the control channel; SDR 2 is retuned to each data grant |
-| Process | `multi_rx.py` | two `rx.py` + `dual_chaser.py` |
+| Process | `multi_rx.py` | `multi_chaser.py` (supervises `multi_rx.py` + `rx.py`) |
 | Catches the **first** transmission | yes | **usually** (see [the timing problem](#the-timing-problem)) |
+| Several sites | yes, if they fit the SDR's window | yes, one chaser follows data grants from every site you list |
 | Needs a channel plan | no | learned from the control channel |
 | Tuning effort | one device, many channels | **two** devices, each tuned individually |
 | CPU | higher (one decoder per channel) | low (RPi-friendly) |
@@ -27,7 +28,7 @@ Two ways to run it, from the same decoder:
 2. [The timing problem](#the-timing-problem)
 3. [Tuning is the whole game](#tuning-is-the-whole-game)
 4. [Approach A — wideband multi-channel](#approach-a--wideband-multi-channel-airspy--multi_rxpy)
-5. [Approach B — two RTL-SDRs and a chaser](#approach-b--two-rtl-sdrs-and-a-chaser)
+5. [Approach B — two RTL-SDRs and a chaser](#approach-b--two-rtl-sdrs-and-a-chaser) (full guide: **[CHASER.md](CHASER.md)**)
 6. [Reading the logs](#reading-the-logs)
 7. [Outputs and integration](#outputs-and-integration)
 8. [Building](#building)
@@ -88,7 +89,7 @@ Approach A has no such problem: every channel already has a receiver on it befor
 Approach B exists because it is a fraction of the cost and is good enough where "any copy" is the
 goal. Choose with that in mind. You can estimate how well a chaser would do on **your** tower before
 buying a second dongle by recording the control channel and replaying it
-(`dual_chaser.py --replay`, see [Approach B](#approach-b--two-rtl-sdrs-and-a-chaser)).
+(`multi_chaser.py --replay`, see [CHASER.md](CHASER.md#estimating-coverage-before-you-buy-a-second-dongle)).
 
 ---
 
@@ -96,7 +97,7 @@ buying a second dongle by recording the control channel and replaying it
 
 This applies to **every** device, and to **each** dongle separately: two RTL-SDRs of the same model
 have different frequency error, different temperature drift and different gain curves. A setting
-that is right for one is wrong for its twin.
+that is right for one is wrong for its twin. 
 
 ### Why data is stricter than voice
 
@@ -119,7 +120,7 @@ that is right for one is wrong for its twin.
    clean, not the highest gain.
 3. **A clean constellation on a real signal.** On the control channel (CQPSK) you should see **four tight,
    well-separated clusters**. Smeared or ring-shaped means too much gain, overload, or a frequency
-   problem.
+   problem. Use ./rx.py on a control channel to ensure you have the PPM and fine-tune dialed in. 
 4. **Counters that agree.** On data channels, a healthy run shows `pdu_passed` ≈ `pdu_attempted`,
    `pkt_crc_fail=0`, and no `ACK-NODL` lines for radios you know were messaged.
 
@@ -149,15 +150,16 @@ Do this once **per dongle**, on the dongle's final antenna and cabling, at its o
 
 ## Approach A — wideband multi-channel (Airspy + `multi_rx.py`)
 
-One Airspy Mini at 6 Msps covers ~5 MHz, enough for 15+ channels of a typical site. `multi_rx.py` runs
+One Airspy Mini at 6 Msps covers ~5 MHz, enough for 15+ frequencies of a typical site. `multi_rx.py` runs
 one decoder per channel in a single process. You can also add channels from multiple towers
-assuming you can hear them clearly. 
+assuming you can hear them clearly. 30 frequencies (across many sites) on a single device all at once is not 
+a problem if you've got a resonable CPU. 
 
 ### Hardware
 
 * Airspy Mini (R820T2) or similar, and a decent antenna with a clear view of the sites you want.
   On strong signals an external LNA or the bias-T can make overload worse; start without them.
-* A machine with enough CPU for one decoder per channel. **An RPi will not handle more than about 4 channels.**
+* A machine with enough CPU for one decoder per channel. **An RPi will not handle more than about 4 freqs** (use Approach B on a Pi).
 
 ### Install
 
@@ -257,67 +259,38 @@ Decoded texts appear as `TMS_TEXT …` lines and are sent on UDP 51003 (see [Out
 ## Approach B — two RTL-SDRs and a chaser
 
 ```
- SDR 1 ─▶ rx.py (parked on the control channel, never retuned) ─ TSBK ─UDP 51002─┐
-                                                                                ▼
- SDR 2 ◀─ rx.py (the chaser, HTTP :8086) ◀── set_freq ───────────── dual_chaser.py
-          └─ decode activity ─ UDP 51001 / TMS 51003 ──────────────────────────▶
+ SDR 1 ─▶ multi_rx.py (one decoder per control channel, parked, never retuned)
+              │ every TSBK, UDP 51002
+              ▼
+          multi_chaser.py ── set_freq ──▶ SDR 2 ─▶ rx.py (the chaser)
+              ▲                                      │ decode activity / TMS text
+              └──────────── UDP 51001 / 51003 ───────┘
 ```
 
-`dual_chaser.py` (in `op25/gr-op25_repeater/apps/`) learns the tower's channel plan (`IDEN_UP`),
-follows data grants for the radios you care about, holds while the chaser decodes, and releases.
-Standard library only. Use `--replay` to estimate coverage before buying a second dongle.
-
-### Step 0 — decide whether it will work on *your* tower
-
-Record the CC for an hour or two (SDR 1 only, TSBKs only), then replay:
+`multi_chaser.py` is a **single program**. Give it one JSON file describing both dongles and the control
+channels you want to watch (one site or several). It writes the `multi_rx.py` config, starts and
+supervises both OP25 processes, learns each tower's channel plan, chases data grants for the radios you
+care about, and saves every text it decodes.
 
 ```bash
-python3 dual_chaser.py --replay cc.log --rid-range LO-HI
+cd op25/gr-op25_repeater/apps
+cp multi_chaser.example.json multi_chaser.json     # edit: serials, ppm, gains, control channels, RID range
+python3 multi_chaser.py --config multi_chaser.json --check-config   # show what it would run
+python3 multi_chaser.py --config multi_chaser.json
 ```
 
-It reports how many target bursts one chaser would have covered. On a busy tower **you must filter by
-RID range**. The replay *models* retune time; remember that, because of [the timing problem](#the-timing-problem),
-the first copy is not catchable — only repeats and later copies.
+Before running it, **tune each dongle individually** with the
+[RTL procedure](#procedure--rtl-sdr-approach-b-and-any-single-channel-rxpy-run) above. A chaser on top
+of an untuned dongle looks like a chaser problem and it isn't.
 
-### Step 1 — tune each dongle individually
-
-Follow the [RTL procedure](#procedure--rtl-sdr-approach-b-and-any-single-channel-rxpy-run) **for both
-dongles, separately**, before connecting them to the chaser. Prove each one decodes cleanly on its own
-(SDR 1 on the CC; SDR 2 on a busy data channel) first. Only then add the chaser. A chaser on top of
-an untuned dongle will look like a chaser problem and it won't be.
-
-### Step 2 — run
-
-This requires 3 separate terminals/shells. I recommend running them in a screen session to detach. 
-(Combining into one launcher is on my list)
-
-Prepare a trunking TSV (e.g. `trunk-cc.tsv`) that parks SDR 1 on your site's control channel.
-This also points to `blank.wlist` to maintain the CC. 
-Use the **ppm and gain values you measured for each dongle** — do not copy settings across dongles.
-
-```bash
-# SDR 1: control channel, never retuned. Exports TSBKs to UDP 51002 (built into the decoder).
-# Be sure YOUR site control-channel frequency is in trunk-cc.tsv — that holds it on the CC.
-python3 rx.py --args "rtl=<your_rtl_sn_1>,buflen=16384" -f <CC_HZ> -S 1000000 -o 150000 \
-    -q <ppm1> -g <gain1> -D cqpsk -T trunk-cc.tsv -l http:0.0.0.0:8085
-
-# SDR 2: the chaser. Starts on any data channel. Activity pings + TMS text.
-P25_ACTIVITY_PING=1 python3 rx.py --args "rtl=<your_rtl_sn_2>,buflen=16384" -f <DATA_HZ> \
-    -S 1000000 -o 150000 -q <ppm2> -g <gain2> -D cqpsk -l http:0.0.0.0:8086
-
-# controller
-python3 dual_chaser.py --tune-http http://127.0.0.1:8086/ --rid-range <LO>-<HI>
-```
-
-Keep any other flags you normally pass to `rx.py` for a known-good single-SDR run.
-Start both decoders, wait for the controller to print `CHANNEL PLAN` lines (the plan arrives every few
-seconds), then it begins chasing.
+The complete guide (configuration reference, how a chase works, outputs, log lines, troubleshooting) is
+in **[CHASER.md](CHASER.md)**.
 
 ### What to expect
-* Not all agencies use packet data / TMS etc. The traffic may simply not exist. 
-* Texts to a radio are sent once **per radio**, a few seconds apart. Retune timing is the gap.
-* The controller logs every chase with `grant → tune-done → first decode` timing and counts grants it
-  could not take because it was busy (`BUSY-MISS`).
+* Not all agencies use packet data / TMS. The traffic may simply not exist.
+* Texts to a radio are sent once **per radio**. Retune timing is the gap.
+* On my test system the first decode arrives about 0.4 s after the grant. The chaser logs every chase with
+  its timing and counts grants it could not take because it was busy (`BUSY-MISS`).
 
 ---
 
@@ -347,7 +320,8 @@ All local (`127.0.0.1`), fire-and-forget UDP:
 | 51002 | decoder | every CRC-good TSBK, 14 raw bytes (opcode, last-block flag, 12 octets) |
 | 51001 | decoder (`P25_ACTIVITY_PING=1`) | `{"rid":N,"sec":1}` per header-valid PDU |
 
-`dual_chaser.py --text-log chaser_texts.jsonl` appends every decoded text as JSON lines.
+`multi_chaser.py` appends every decoded text to `chaser_texts.jsonl` (see [CHASER.md](CHASER.md#output)).
+These files contain message content: keep them out of version control.
 
 ---
 
@@ -383,18 +357,18 @@ For RTL-SDR blacklisting / driver tips, see [README-update-rtlsdr.md](README-upd
 | One channel always off by a few hundred Hz | transmitter offset, not you | No action needed if it still decodes |
 | Chaser logs a decode but no text | the "decode" was an ACK, not the page | Expected — see [timing](#the-timing-problem) |
 | Constellation empty on a data channel | no burst right now | Not a fault; data is bursty |
-| `ACK-NODL` lines for radios you know were messaged | missed downlink (tuning, timing, or busy chaser) | Check ppm/gain; for Approach B review `BUSY-MISS` and retune latency |
+| `ACK-NODL` lines for radios you know were messaged | missed downlink (tuning, timing, or busy chaser) | Check ppm/gain; for Approach B review `BUSY-MISS` and retune latency ([CHASER.md](CHASER.md#troubleshooting)) |
 
 ---
 
 ## Status, limits, legal
 
 **Tested on:** P25 Phase 1 CQPSK data channels; Airspy Mini on an x86 Linux box;
-dual chaser built for and tested with 2× RTL-SDR on a Raspberry Pi (aarch64).
+the chaser (`multi_chaser.py`) built for and tested with 2× RTL-SDR on a Raspberry Pi (aarch64).
 Phase 2 (TDMA) is out of scope.
 
 **RPi users:** The chaser path is the practical choice on low-power CPUs — only two decoders run at
-once. Airspy/`multi_rx.py` is more complete but needs substantially more CPU.
+once. Airspy/`multi_rx.py` is more complete (and better!) but needs substantially more CPU.
 
 **Privacy and law.** Rules on monitoring radio traffic differ by country and by service, and data
 PDUs can contain unique information. You are responsible for operating this lawfully.
